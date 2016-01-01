@@ -1,0 +1,19 @@
+{
+ "settings": {
+  "mappings": {
+   "article": {
+    "properties": {
+     "title": {"type": "string"},
+     "opinion": {"type": "string"}
+    }
+   },
+   "opinion": {
+    "_parent": {"type": "immo"},
+    "properties": {
+     "user_id": {"type": "string"},
+     "opinion": {"type": "string"}
+    }
+   }
+  }
+ }
+}

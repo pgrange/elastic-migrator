@@ -1,0 +1,142 @@
+#!/bin/bash
+#FIXME add option so that program stops at first error
+
+[[ -z $ELASTIC_PORT ]] && ELASTIC_PORT=128000
+
+usage() {
+  local status=$1; shift
+  local message="$*"
+
+  cat >&2 <<EOF
+$message
+  $0 <index> <version>
+    Creates a new index <index>_<version> for the specified
+    index and version.
+    Migrates data from the previous version index if it exists.
+    Updates or creates an alias named <index> pointing to
+    <index>_<version>
+
+    The description of the index mapping must exist under
+    directory mappings/<index>/<version>
+EOF
+
+  exit $status
+}
+remove_alias() {
+  local index="$1"
+  local alias="$2"
+  echo  {\"remove\": {\"index\": \"$index\", \"alias\": \"$alias\"}}
+}
+index_exists() {
+  local index="$1"
+  local version=$2
+  curl -f -XGET localhost:$ELASTIC_PORT/"$index"_$version/_settings >/dev/null 2>&1
+}
+current_indexes_for_alias() {
+  local alias="$1"
+  curl -f -XGET localhost:$ELASTIC_PORT/_alias/"$alias" | jq -r 'keys | .[]'
+}
+create_index() {
+  local index="$1"
+  local version="$2"
+  local settings="mappings/$index/version_$version/settings.json"
+  if [ -e "$settings" ]
+  then
+    curl -f -XPUT localhost:$ELASTIC_PORT/"$index"_"$version" -d "$(cat $settings)"
+  else
+    curl -f -XPUT localhost:$ELASTIC_PORT/"$index"_"$version"
+  fi
+}
+update_aliases() {
+  local index="$1"
+  local version=$2
+  local alias="$index"
+  local target="$index"_$version
+
+  curl -f -XPOST localhost:$ELASTIC_PORT/_aliases -d "
+  {
+    \"actions\": [
+      $(for old_index in $(current_indexes_for_alias "$alias")
+        do
+          echo {\"remove\": {\"index\": \"$old_index\", \"alias\": \"$alias\"}}
+          echo -n ,
+        done)
+      {\"add\": {\"index\": \"$target\", \"alias\": \"$alias\"}}
+    ]
+  }"
+}
+import_data_from_previous_version() {
+ local index="$1"
+ local version=$2
+ local previous_version=$(($version - 1))
+ if index_exists "$index" $previous_version
+ then
+   dump_index "$index" $previous_version \
+   | bulk_insert "$index" $version
+ fi
+}
+
+#####
+# dump functions
+
+function init_scroll() {
+  index="$1"
+  curl -sf -XGET "localhost:$ELASTIC_PORT/${index}/_search?search_type=scan&pretty&size=100&scroll=10m" -d '
+  {
+   "query": {"match_all" : {}}
+  }' \
+  | jq -r "._scroll_id,.hits.total"
+}
+
+function scroll() {
+  scroll_id=$1
+  curl -f -XGET "localhost:$ELASTIC_PORT/_search/scroll?scroll=10m" -d  ${scroll_id} \
+  | jq '.hits.hits[]'
+  return ${PIPESTATUS[0]}
+}
+
+dump_index() {
+  index="$1"
+  version=$2
+  set $(init_scroll "$index"_$version)
+  scroll_id=$1
+  total=$2
+
+  while scroll ${scroll_id}
+  do
+    echo -n
+  done
+}
+
+function bulk_insert() {
+  index="$1"
+  version=$2
+
+  jq -c "{index:{_index: \"${index}_${version}\",_type,_id}},._source" \
+  | curl -fs -XPOST localhost:$ELASTIC_PORT/_bulk --data-binary @-
+}
+
+#####
+
+index="$1"
+version=$2
+
+# check preconditions
+
+echo $version | grep -E '^[0-9]*$' \
+|| usage 5 version must be an integer but was $version
+[[ -d mappings/$index ]] \
+|| usage 3 mappings/$index should exist
+[[ -d mappings/$index/version_$version ]] \
+|| usage 4 mappings/$index/version_$version should exist
+
+if index_exists "$index" $version
+then
+  usage 2 index $index already exists for version $version
+fi
+
+# preconditions OK
+
+create_index "$index" $version
+import_data_from_previous_version "$index" $version
+update_aliases "$index" $version

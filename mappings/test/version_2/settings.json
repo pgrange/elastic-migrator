@@ -1,0 +1,12 @@
+{
+ "settings": {
+  "mappings": {
+   "person": {
+    "properties": {
+     "name": {"type": "string"},
+     "address": {"type": "string"}
+    }
+   }
+  }
+ }
+}
